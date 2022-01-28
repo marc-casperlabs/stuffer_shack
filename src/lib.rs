@@ -7,7 +7,15 @@
 //!
 //! Overhead per stored value on disk is 4 bytes per record.
 
-use std::{collections::HashMap, fs, hash::Hash, io, mem, path::Path, sync::atomic::AtomicU64};
+use std::{
+    collections::HashMap,
+    fs,
+    hash::Hash,
+    io::{self, Seek, SeekFrom, Write},
+    mem,
+    path::Path,
+    sync::atomic::AtomicU64,
+};
 
 use memmap::{MmapMut, MmapOptions};
 
@@ -16,7 +24,9 @@ use memmap::{MmapMut, MmapOptions};
 // TODO: Persist write offset.
 // TODO: Consider packing.
 
-const MAP_SIZE: usize = usize::MAX / 2;
+// const MAP_SIZE: usize = usize::MAX / 2;
+const MAP_SIZE: usize = u32::MAX as usize; // TODO: Figure out why allocation fails.
+
 type ItemLen = u32;
 type DbLen = u64;
 const ITEM_LEN_SIZE: usize = mem::size_of::<ItemLen>();
@@ -44,49 +54,65 @@ where
     K: Copy + Eq + Hash + AsRef<[u8]>,
 {
     fn open_disk<P: AsRef<Path>>(db: P) -> io::Result<Self> {
-        let backing_file = fs::OpenOptions::new()
+        let mut backing_file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(db)?;
+
+        let file_len = backing_file.seek(SeekFrom::End(0))?;
+        backing_file.seek(SeekFrom::Start(0))?;
+
+        // TODO: Is this necessary outside OS X?
+        backing_file.set_len(dbg!(MAP_SIZE as u64))?;
+        backing_file.flush()?;
+
         let data = unsafe { MmapOptions::new().len(MAP_SIZE).map_mut(&backing_file)? };
+
         // TODO: Probably not necessary? Forgetting the backing file, so it won't be closed here.
         mem::forget(backing_file);
 
         // TODO: Write offset.
-        Self::new(data)
+        Self::new(data, file_len == 0)
     }
 
     fn open_ephemeral(size: usize) -> io::Result<Self> {
         let data = unsafe { MmapOptions::new().len(size).map_anon()? };
-        Self::new(data)
+        Self::new(data, true)
     }
 
-    fn new(mut data: MmapMut) -> io::Result<Self> {
+    fn new(mut data: MmapMut, needs_init: bool) -> io::Result<Self> {
         let header = &mut data[0..DB_HEADER_SIZE];
+
         let mut index = HashMap::new();
-        if &header[0..MAGIC_BYTES_LEN] != &MAGIC_BYTES[..] {
+        eprintln!("checking");
+        if dbg!(needs_init) {
             // Database not initialized, write the magic bytes and initial length.
             header[0..MAGIC_BYTES_LEN].copy_from_slice(&MAGIC_BYTES);
             let initial_len: DbLen = 0;
             header[MAGIC_BYTES_LEN..].copy_from_slice(&initial_len.to_le_bytes());
-        } else {
-            // We're already initialized, so walk entire data to restore the index.
-            let total_size = store_length(&data) as usize;
-            let mut cur = DB_HEADER_SIZE;
-            while cur < total_size {
-                let record = load_record::<K>(&data, cur as u64);
-                // length, hash, data. We only need the hash.
-                // TODO: Unsafe-cast record header instead.
-                let hash_bytes = &record[ITEM_LEN_SIZE..(ITEM_LEN_SIZE + mem::size_of::<K>())];
-
-                // TODO: Find something better (moot with record header).
-                let hash_ptr: *const K = hash_bytes.as_ptr() as *const K;
-                let hash = unsafe { *hash_ptr };
-
-                index.insert(hash, cur as DbLen);
-            }
+        } else if &header[0..MAGIC_BYTES_LEN] != &MAGIC_BYTES[..] {
+            return Err(todo!("magic bytes incorrect"));
         }
+        eprintln!("check successful");
+
+        // We're already initialized, so walk entire data to restore the index.
+        let total_size = store_length(&data) as usize;
+        let mut cur = DB_HEADER_SIZE;
+        while cur < total_size {
+            let record = load_record::<K>(&data, cur as u64);
+            // length, hash, data. We only need the hash.
+            // TODO: Unsafe-cast record header instead.
+            let hash_bytes = &record[ITEM_LEN_SIZE..(ITEM_LEN_SIZE + mem::size_of::<K>())];
+
+            // TODO: Find something better (moot with record header).
+            let hash_ptr: *const K = hash_bytes.as_ptr() as *const K;
+            let hash = unsafe { *hash_ptr };
+
+            index.insert(hash, cur as DbLen);
+            cur += record.len();
+        }
+        dbg!(index.len());
 
         Ok(StufferShack { index, data })
     }
@@ -280,17 +306,17 @@ mod tests {
 
     #[test]
     fn ten_million_entries() {
-        let mut data = DataGen::new();
-
         let count = 1_000_000;
 
         // TODO: Do on-disk.
-        let mut shack: StufferShack<Key> =
-            StufferShack::open_ephemeral(1024 * 1024 * 1024).unwrap();
-        // let mut shack: StufferShack<Key> = StufferShack::open_disk("test.shack").unwrap();
+        // let mut shack: StufferShack<Key> =
+        // StufferShack::open_ephemeral(1024 * 1024 * 1024).unwrap();
+        let mut shack: StufferShack<Key> = StufferShack::open_disk("test.shack").unwrap();
+
+        let mut total_payload = 0usize;
 
         // First, write entries.
-        let mut total_payload = 0usize;
+        let data = DataGen::new();
         for (key, value) in data.take(count) {
             total_payload += key.len() + value.len();
 
