@@ -11,3 +11,7 @@ proptest = "1.0.0"
 proptest-derive = "0.3.0"
 
 [features]
+
+[dev-dependencies]
+rand = { version = "0.8.4", features = ["std_rng"] }
+rand_chacha = "0.3.1"
