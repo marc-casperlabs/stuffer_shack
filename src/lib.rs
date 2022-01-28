@@ -1,4 +1,13 @@
-use std::{collections::HashMap, fs, hash::Hash, io, mem, path::Path, sync::atomic::AtomicUsize};
+//! Efficient WAL-only storage.
+//!
+//! Data format:
+//!
+//! Record := Length || Hash || Value
+//! WAL := [Record]
+//!
+//! Overhead per stored value on disk is 4 bytes per record.
+
+use std::{collections::HashMap, fs, hash::Hash, io, mem, path::Path, sync::atomic::AtomicU64};
 
 use memmap::{MmapMut, MmapOptions};
 
@@ -7,14 +16,16 @@ use memmap::{MmapMut, MmapOptions};
 // TODO: Persist write offset.
 
 const MAP_SIZE: usize = usize::MAX / 2;
-type Length = u32;
-const LENGTH_SIZE: usize = mem::size_of::<Length>();
+type ItemLen = u32;
+type DbLen = u64;
+const ITEM_LEN_SIZE: usize = mem::size_of::<ItemLen>();
+const DB_LEN_SIZE: usize = mem::size_of::<DbLen>();
+const DB_HEADER_SIZE: usize = DB_LEN_SIZE;
 
 #[derive(Debug)]
 struct StufferShack<K> {
     /// Maps a key to an offset.
-    index: HashMap<K, usize>,
-    write_offset: AtomicUsize,
+    index: HashMap<K, DbLen>,
     data: MmapMut,
 }
 
@@ -29,6 +40,7 @@ impl<K> StufferShack<K> {
         // TODO: Probably not necessary? Forgetting the backing file, so it won't be closed here.
         mem::forget(backing_file);
 
+        // TODO: Write offset.
         Self::new(data)
     }
 
@@ -41,7 +53,6 @@ impl<K> StufferShack<K> {
         // TODO: Restore index.
         Ok(StufferShack {
             index: Default::default(),
-            write_offset: AtomicUsize::new(0), // TODO: Load offset from somewhere.
             data,
         })
     }
@@ -52,6 +63,54 @@ where
     // TODO: Cleanup traits, `K` needs to be a fixed size POD.
     K: Copy + Eq + Hash + AsRef<[u8]>,
 {
+    /// Retrieves the length of the db without header from the db header.
+    fn store_length(&self) -> DbLen {
+        DbLen::from_le_bytes(self.data[0..DB_LEN_SIZE].try_into().unwrap())
+    }
+
+    /// Store the length of the db without the header in the db header.
+    fn write_store_length(&mut self, size: DbLen) {
+        let dest = &mut self.data[0..DB_LEN_SIZE];
+        dest.copy_from_slice(&size.to_le_bytes());
+    }
+
+    /// Converts a database offset into a memory offset, which includes the header.
+    fn data_offset_to_memory_offset(offset: DbLen) -> usize {
+        offset as usize + DB_HEADER_SIZE
+    }
+
+    fn calc_record_len(value_len: ItemLen) -> DbLen {
+        (ITEM_LEN_SIZE + mem::size_of::<K>() + value_len as usize)
+            .try_into()
+            .unwrap()
+    }
+
+    /// Reserves a record in the db with the specified size.
+    ///
+    /// Returns the data offset and a writable slice.
+    fn reserve_record(&mut self, record_size: ItemLen) -> (DbLen, &mut [u8]) {
+        let old_store_length = self.store_length();
+        let new_store_length = old_store_length + record_size as DbLen;
+        self.write_store_length(new_store_length);
+        let data = &mut self.data[Self::data_offset_to_memory_offset(old_store_length)
+            ..Self::data_offset_to_memory_offset(new_store_length)];
+        (old_store_length, data)
+    }
+
+    /// Loads a record from a specified offset.
+    fn load_record(&self, data_offset: DbLen) -> &[u8] {
+        // Read the length.
+        let mem_offset = Self::data_offset_to_memory_offset(data_offset);
+        let value_len = ItemLen::from_le_bytes(
+            self.data[mem_offset..(mem_offset + ITEM_LEN_SIZE)]
+                .try_into()
+                .unwrap(),
+        );
+        let record_len = Self::calc_record_len(value_len);
+
+        &self.data[mem_offset..(mem_offset + record_len as usize)]
+    }
+
     // TODO: Allow parallel writes.
     fn write(&mut self, key: K, value: &[u8]) {
         assert!(
@@ -63,45 +122,31 @@ where
         // TODO: See if ordering can be relaxed.
         // TODO: Ensure conversion is not lossy.
         let value_len = value.len();
-        assert!(value_len <= Length::MAX as usize);
+        assert!(value_len <= ItemLen::MAX as usize);
 
         // Format: LENGTH(32) + KEY + VALUE
-        let total_len = LENGTH_SIZE + mem::size_of::<K>() + value_len;
-
-        let start_len = self
-            .write_offset
-            .fetch_add(total_len, std::sync::atomic::Ordering::SeqCst);
-
-        let start_key = start_len + LENGTH_SIZE;
-        let start_value = start_key + mem::size_of::<K>();
+        let record_len = Self::calc_record_len(value_len as u32);
+        let (record_offset, record) = self.reserve_record(record_len.try_into().unwrap());
 
         // TODO: Optimize range checks.
-        // Write length, key, data.
-        let slice_len = &mut self.data[start_len..start_key];
-        slice_len.copy_from_slice(&(value_len as u32).to_le_bytes());
 
-        let slice_key = &mut self.data[start_key..start_value];
-        slice_key.copy_from_slice(key.as_ref());
+        // Write length to record.
+        record[0..ITEM_LEN_SIZE].copy_from_slice(&(value_len as ItemLen).to_le_bytes());
 
-        let slice_value = &mut self.data[start_value..(start_value + value_len)];
-        slice_value.copy_from_slice(value);
+        let value_offset = ITEM_LEN_SIZE + mem::size_of::<K>();
+        record[ITEM_LEN_SIZE..value_offset].copy_from_slice(key.as_ref());
+        record[value_offset..].copy_from_slice(value);
 
         // Update index.
-        self.index.insert(key, start_len);
+        self.index.insert(key, record_offset);
     }
 
     fn read(&self, key: &K) -> Option<&[u8]> {
-        let start = *self.index.get(key)?;
+        let data_offset = *self.index.get(key)?;
+        let record = self.load_record(data_offset);
 
-        let value_length_slice = &self.data[start..(start + LENGTH_SIZE)];
-        let value_length = Length::from_le_bytes(value_length_slice.try_into().unwrap()) as usize;
-
-        // We skip the key (although we could check it here if wanted to...)
-        let value_start = start + LENGTH_SIZE + mem::size_of::<K>();
-        let value_end = value_start + value_length;
-
-        let data = &self.data[value_start..value_end];
-        Some(data)
+        let value_slice = &record[(ITEM_LEN_SIZE + mem::size_of::<K>())..];
+        Some(value_slice)
     }
 }
 
