@@ -20,6 +20,7 @@ use std::{
 
 use generic_array::{ArrayLength, GenericArray};
 use memmap::{MmapMut, MmapOptions};
+use thiserror::Error;
 
 // TODO: Use im-rs for parallel read/write.
 // TODO: Use serialization of in-memory index, storing offset, to allow fast recovery of WAL.
@@ -33,12 +34,10 @@ type ItemLen = u32;
 type DbLen = u64;
 const ITEM_LEN_SIZE: usize = mem::size_of::<ItemLen>();
 const DB_LEN_SIZE: usize = mem::size_of::<DbLen>();
-const MAGIC_BYTES: [u8; 64] = [
+const MAGIC_BYTES: [u8; 16] = [
     b'S', b'T', b'U', b'F', b'F', b'E', b'R', b'_', b'S', b'H', b'A', b'C', b'K', b'_', b'_', b'_',
-    b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
-    b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
-    b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
 ];
+const ENDIANNESS_CHECK_CONST: u32 = 0xA1B2C3D4;
 
 #[derive(Debug)]
 struct StufferShack<N: ArrayLength<u8>> {
@@ -81,20 +80,20 @@ where
     }
 
     fn new(mut data: MmapMut, needs_init: bool) -> io::Result<Self> {
-        let header = &mut data[0..DB_HEADER_SIZE];
+        // let header = &mut data[0..DB_HEADER_SIZE];
 
-        let mut index = HashMap::new();
-        if dbg!(needs_init) {
-            // Database not initialized, write the magic bytes and initial length.
-            header[0..MAGIC_BYTES_LEN].copy_from_slice(&MAGIC_BYTES);
-            let initial_len: DbLen = 0;
-            header[MAGIC_BYTES_LEN..].copy_from_slice(&initial_len.to_le_bytes());
-        } else if &header[0..MAGIC_BYTES_LEN] != &MAGIC_BYTES[..] {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "database has invalid magic header",
-            ));
-        }
+        // let mut index = HashMap::new();
+        // if dbg!(needs_init) {
+        //     // Database not initialized, write the magic bytes and initial length.
+        //     header[0..MAGIC_BYTES_LEN].copy_from_slice(&MAGIC_BYTES);
+        //     let initial_len: DbLen = 0;
+        //     header[MAGIC_BYTES_LEN..].copy_from_slice(&initial_len.to_le_bytes());
+        // } else if &header[0..MAGIC_BYTES_LEN] != &MAGIC_BYTES[..] {
+        //     return Err(io::Error::new(
+        //         io::ErrorKind::Other,
+        //         "database has invalid magic header",
+        //     ));
+        // }
 
         // // We're already initialized, so walk entire data to restore the index.
         // let total_size = store_length(&data) as usize;
@@ -128,8 +127,9 @@ where
 
     /// Store the length of the db without the header in the db header.
     fn write_store_length(&mut self, size: DbLen) {
-        let dest = &mut self.data[MAGIC_BYTES_LEN..(MAGIC_BYTES_LEN + DB_LEN_SIZE)];
-        dest.copy_from_slice(&size.to_le_bytes());
+        todo!()
+        // let dest = &mut self.data[MAGIC_BYTES_LEN..(MAGIC_BYTES_LEN + DB_LEN_SIZE)];
+        // dest.copy_from_slice(&size.to_le_bytes());
     }
 
     /// Reserves a record in the db with the specified size.
@@ -175,28 +175,103 @@ where
 
 /// Retrieves the length of the db without header from the db header.
 fn store_length(data: &MmapMut) -> DbLen {
-    DbLen::from_le_bytes(
-        data[MAGIC_BYTES_LEN..(MAGIC_BYTES_LEN + DB_LEN_SIZE)]
-            .try_into()
-            .unwrap(),
-    )
+    todo!()
+    // DbLen::from_le_bytes(
+    //     data[MAGIC_BYTES_LEN..(MAGIC_BYTES_LEN + DB_LEN_SIZE)]
+    //         .try_into()
+    //         .unwrap(),
+    // )
 }
 
 /// Converts a database offset into a memory offset, which includes the header.
 fn data_offset_to_memory_offset(offset: DbLen) -> usize {
-    offset as usize + DB_HEADER_SIZE
+    offset as usize + mem::size_of::<DatabaseHeader>()
 }
 
 /// Database header.
 #[derive(Clone, Debug)]
+#[repr(C)]
 struct DatabaseHeader {
-    magic_bytes: [u8; 64],
+    // Magic bytes, see `MAGIC_BYTES`.
+    magic_bytes: [u8; 16],
+    // The value `ENDIANNESS_CHECK_CONST` (will be encoded using native endianness).
+    endianness_check: u32,
+    // Database version. Currently must be 1.
+    version: u32,
+    // The insertion pointer for new values.
     insertion_pointer: u32,
+    /// The size of a key.
+    key_length: u16,
+    // Extra header space, intentionally left blank for future versions.
+    _padding: [u8; 34],
+}
+
+#[derive(Copy, Clone, Debug, Error)]
+enum InvalidDatabaseError {
+    /// First bytes were not equal to the magic file header.
+    #[error("invalid magic at start of file")]
+    InvalidMagic,
+    /// The endianness constant found in the header differed from the stored one.
+    #[error("database failed endianness check")]
+    EndiannessMismatch,
+    /// Version mismatch.
+    #[error("version not supported: {version}")]
+    UnsupportedVersion {
+        /// The version found in the database file.
+        version: u32,
+    },
+    /// The compile-time configured key length does not match opened db.
+    #[error("key length mismatch (expected {expected}, actual {actual}")]
+    KeyLengthMismatch {
+        /// Version that was expected, based on how the database was instantiated.
+        expected: u16,
+        /// Version found in the database.
+        actual: u16,
+    },
+    /// The key length given at compile time is too large to fit a `u16`.
+    #[error("key length overflow")]
+    KeyLengthOverflow,
 }
 
 impl DatabaseHeader {
-    fn is_valid(&self) -> bool {
-        self.magic_bytes == MAGIC_BYTES
+    /// Checks that the header is valid for keys with the specified size.
+    fn is_valid<N: ArrayLength<u8>>(&self) -> Result<(), InvalidDatabaseError> {
+        let key_length = mem::size_of::<GenericArray<u8, N>>();
+
+        // Sanity check to ensure all of our data structures have the right size.
+        assert_eq!(mem::size_of::<DatabaseHeader>(), 64);
+        assert_eq!(
+            mem::size_of::<RecordHeader<N>>(),
+            // Four bytes (for the offset pointer) + the actual length of the array.
+            4 + key_length
+        );
+
+        if self.magic_bytes != MAGIC_BYTES {
+            return Err(InvalidDatabaseError::InvalidMagic);
+        }
+
+        if self.endianness_check != ENDIANNESS_CHECK_CONST {
+            return Err(InvalidDatabaseError::EndiannessMismatch);
+        }
+
+        if self.version != 1 {
+            return Err(InvalidDatabaseError::UnsupportedVersion {
+                version: self.version,
+            });
+        }
+
+        if key_length > u16::MAX as usize {
+            return Err(InvalidDatabaseError::KeyLengthOverflow);
+        }
+
+        if self.key_length != key_length as u16 {
+            return Err(InvalidDatabaseError::KeyLengthMismatch {
+                expected: key_length as u16,
+                actual: self.key_length,
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -219,9 +294,6 @@ fn record_at_offset<N: ArrayLength<u8>>(
     data_offset: DbLen,
 ) -> (&RecordHeader<N>, &[u8]) {
     let header_size = mem::size_of::<RecordHeader<N>>();
-
-    // A "const" assertion as a sanity check we stuck into this function.
-    debug_assert_eq!(header_size, 4 + mem::size_of::<GenericArray<u8, N>>());
 
     let start = data_offset_to_memory_offset(data_offset);
     let header_ptr = start as *const RecordHeader<N>;
