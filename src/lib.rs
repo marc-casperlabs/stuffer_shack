@@ -179,18 +179,44 @@ mod tests {
     use std::mem;
 
     use super::StufferShack;
-    use proptest::proptest;
+    use generic_array::{typenum::U32, GenericArray};
+    use proptest::{arbitrary::Arbitrary, proptest, strategy::Strategy};
     use proptest_derive::Arbitrary;
     use rand::{Rng, SeedableRng};
 
-    type Key = [u8; 32];
+    type Key = GenericArray<u8, U32>;
 
-    #[derive(Debug, Arbitrary)]
+    #[derive(Debug)]
     struct WriteReadTask {
         key: Key,
         raw_value: [u8; 32],
-        #[proptest(strategy = "0usize..32")]
         len: usize,
+    }
+
+    impl Arbitrary for WriteReadTask {
+        type Parameters = ();
+
+        fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+            WriteReadTaskStrategy
+        }
+
+        type Strategy = WriteReadTaskStrategy;
+    }
+
+    struct WriteReadTaskStrategy;
+
+    impl Strategy for WriteReadTaskStrategy {
+        type Tree;
+
+        type Value;
+
+        fn new_tree(
+            &self,
+            runner: &mut proptest::test_runner::TestRunner,
+        ) -> proptest::strategy::NewTree<Self> {
+            todo!()
+        }
+        //
     }
 
     impl WriteReadTask {
