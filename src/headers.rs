@@ -2,7 +2,7 @@ use std::mem;
 
 use generic_array::{ArrayLength, GenericArray};
 
-use crate::error::InvalidDatabaseError;
+use crate::{error::InvalidDatabaseError, unchecked_cast::Pod};
 
 /// The magic bytes, indicating that a given file is a stuffer shack db.
 const MAGIC_BYTES: [u8; 16] = [
@@ -30,9 +30,11 @@ pub(crate) struct DatabaseHeader {
     pub(crate) _padding: [u8; 34],
 }
 
+unsafe impl Pod for DatabaseHeader {}
+
 impl DatabaseHeader {
     /// Checks that the header is valid for keys with the specified size.
-    fn is_valid<N>(&self) -> Result<(), InvalidDatabaseError>
+    pub(crate) fn check_valid<N>(&self) -> Result<(), InvalidDatabaseError>
     where
         N: ArrayLength<u8>,
         N::ArrayType: Copy,
@@ -74,6 +76,22 @@ impl DatabaseHeader {
 
         Ok(())
     }
+
+    /// Resets the database header.
+    pub(crate) fn reset<N>(&mut self)
+    where
+        N: ArrayLength<u8>,
+        N::ArrayType: Copy,
+    {
+        assert!(mem::size_of::<GenericArray<u8, N>>() < u16::MAX as usize);
+
+        self.magic_bytes = MAGIC_BYTES;
+        self.endianness_check = ENDIANNESS_CHECK_CONST;
+        self.version = 1;
+        self.insertion_pointer = mem::size_of::<Self>() as u32;
+        self.key_length = mem::size_of::<GenericArray<u8, N>> as u16;
+        self._padding = [0; 34];
+    }
 }
 
 /// Record header.
@@ -88,4 +106,11 @@ where
     pub(crate) value_length: u32,
     /// The key, typically a hash.
     pub(crate) key: GenericArray<u8, N>,
+}
+
+unsafe impl<N> Pod for RecordHeader<N>
+where
+    N: ArrayLength<u8>,
+    N::ArrayType: Copy,
+{
 }

@@ -1,6 +1,19 @@
 //! Various errors used by the crate.
 
+use std::io;
+
 use thiserror::Error;
+
+/// Top-level error for the stuffer shack database crate.
+#[derive(Debug, Error)]
+pub enum StufferShackError {
+    /// Error opening the database.
+    #[error("could not open database")]
+    DatabaseOpen(#[source] io::Error),
+    /// Error initialising the database.
+    #[error("database invalid")]
+    DatabaseInit(#[source] InvalidDatabaseError),
+}
 
 /// A database (header) validation error.
 #[derive(Copy, Clone, Debug, Error)]

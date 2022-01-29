@@ -21,12 +21,13 @@ use std::{
     path::Path,
 };
 
+use error::{InvalidDatabaseError, StufferShackError};
 use generic_array::{ArrayLength, GenericArray};
 use memmap::{MmapMut, MmapOptions};
 
 use crate::{
     headers::{DatabaseHeader, RecordHeader},
-    unchecked_cast::UncheckedCastMut,
+    unchecked_cast::{UncheckedCast, UncheckedCastMut},
 };
 
 // TODO: Use im-rs for parallel read/write.
@@ -55,44 +56,60 @@ where
     N::ArrayType: Copy,
 {
     /// Opens a database that is backed by a file on the filesystem.
-    pub fn open_disk<P: AsRef<Path>>(db: P) -> io::Result<Self> {
+    pub fn open_disk<P: AsRef<Path>>(db: P) -> Result<Self, StufferShackError> {
         let mut backing_file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(db)?;
+            .open(db)
+            .map_err(StufferShackError::DatabaseOpen)?;
 
         // Determine the length of the existing file.
-        let file_len = backing_file.seek(SeekFrom::End(0))?;
-        backing_file.seek(SeekFrom::Start(0))?;
+        let file_len = backing_file
+            .seek(SeekFrom::End(0))
+            .map_err(StufferShackError::DatabaseOpen)?;
+        backing_file
+            .seek(SeekFrom::Start(0))
+            .map_err(StufferShackError::DatabaseOpen)?;
 
         // Truncate the file to the maximum length. This may need to be made configurable, as they allocated file size varies between operation systems, depending on whether they support sparse files. Additionally, while this is necessary on OS X, it is unnecessary on Linux.
-        backing_file.set_len(MAP_SIZE as u64)?;
-        backing_file.flush()?;
+        backing_file
+            .set_len(MAP_SIZE as u64)
+            .map_err(StufferShackError::DatabaseOpen)?;
+        backing_file
+            .flush()
+            .map_err(StufferShackError::DatabaseOpen)?;
 
-        let data = unsafe { MmapOptions::new().len(MAP_SIZE).map_mut(&backing_file)? };
+        let data = unsafe { MmapOptions::new().len(MAP_SIZE).map_mut(&backing_file) }
+            .map_err(StufferShackError::DatabaseOpen)?;
 
         // TODO: Probably not necessary? We forget the backing file, so it won't be closed on drop.
         mem::forget(backing_file);
 
-        Self::new(data, file_len == 0)
+        Self::new(data, file_len == 0).map_err(StufferShackError::DatabaseInit)
     }
 
     /// Opens an in-memory database not backed by a file.
-    pub fn open_ephemeral(size: usize) -> io::Result<Self> {
-        let data = unsafe { MmapOptions::new().len(size).map_anon()? };
-        Self::new(data, true)
+    pub fn open_ephemeral(size: usize) -> Result<Self, StufferShackError> {
+        let data = MmapOptions::new()
+            .len(size)
+            .map_anon()
+            .map_err(StufferShackError::DatabaseOpen)?;
+        Self::new(data, true).map_err(StufferShackError::DatabaseInit)
     }
 
     /// Creates a new stuffer shack database.
     ///
     /// If `needs_init` is true, a database header will be written immediately. Otherwise, an
     /// existing header is assumed to exist and will be checked.
-    fn new(mut data: MmapMut, needs_init: bool) -> io::Result<Self> {
+    fn new(mut data: MmapMut, needs_init: bool) -> Result<Self, InvalidDatabaseError> {
         if needs_init {
             let new_header: &mut DatabaseHeader = data.at_mut(0);
+            new_header.reset::<N>();
         }
-        // let header = &mut data[0..DB_HEADER_SIZE];
+
+        let header: &DatabaseHeader = data.at(0);
+        header.check_valid::<N>()?;
 
         // let mut index = HashMap::new();
         // if dbg!(needs_init) {
