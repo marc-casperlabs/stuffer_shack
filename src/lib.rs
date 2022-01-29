@@ -41,12 +41,15 @@ type ItemLen = u32;
 type DbLen = u64;
 const ITEM_LEN_SIZE: usize = mem::size_of::<ItemLen>();
 const DB_LEN_SIZE: usize = mem::size_of::<DbLen>();
+
+/// An append-only database with fixed keys.
 #[derive(Debug)]
 pub struct StufferShack<N: ArrayLength<u8>> {
     /// Maps a key to an offset.
     index: HashMap<GenericArray<u8, N>, DbLen>,
     /// Internal data map.
     data: MmapMut,
+    /// Phantom data to record key length.
     _key: PhantomData<N>,
 }
 
@@ -111,43 +114,21 @@ where
         let header: &DatabaseHeader = data.at(0);
         header.check_valid::<N>()?;
 
-        // let mut index = HashMap::new();
-        // if dbg!(needs_init) {
-        //     // Database not initialized, write the magic bytes and initial length.
-        //     header[0..MAGIC_BYTES_LEN].copy_from_slice(&MAGIC_BYTES);
-        //     let initial_len: DbLen = 0;
-        //     header[MAGIC_BYTES_LEN..].copy_from_slice(&initial_len.to_le_bytes());
-        // } else if &header[0..MAGIC_BYTES_LEN] != &MAGIC_BYTES[..] {
-        //     return Err(io::Error::new(
-        //         io::ErrorKind::Other,
-        //         "database has invalid magic header",
-        //     ));
-        // }
+        let mut index = HashMap::new();
 
-        // // We're already initialized, so walk entire data to restore the index.
-        // let total_size = store_length(&data) as usize;
-        // let mut cur = DB_HEADER_SIZE;
-        // while cur < total_size {
-        //     let record = load_record::<K>(&data, cur as u64);
-        //     // length, hash, data. We only need the hash.
-        //     // TODO: Unsafe-cast record header instead.
-        //     let hash_bytes = &record[ITEM_LEN_SIZE..(ITEM_LEN_SIZE + mem::size_of::<K>())];
+        // Walk entire data to restore the index.
+        let mut cur = mem::size_of::<DatabaseHeader>() as u64;
+        while cur < header.next_insert {
+            let record_header: &RecordHeader<N> = data.at(cur as usize);
+            index.insert(record_header.key, cur);
+            cur += record_header.value_length as u64;
+        }
 
-        //     // TODO: Find something better (moot with record header).
-        //     let hash_ptr: *const K = hash_bytes.as_ptr() as *const K;
-        //     let hash = unsafe { *hash_ptr };
-
-        //     index.insert(hash, cur as DbLen);
-        //     cur += record.len();
-        // }
-        // dbg!(index.len());
-
-        // Ok(StufferShack {
-        //     index,
-        //     data,
-        //     _key: PhantomData,
-        // })
-        todo!()
+        Ok(StufferShack {
+            index,
+            data,
+            _key: PhantomData,
+        })
     }
 
     fn size(&self) -> u64 {

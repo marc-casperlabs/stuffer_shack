@@ -23,11 +23,11 @@ pub(crate) struct DatabaseHeader {
     // Database version. Currently must be 1.
     pub(crate) version: u32,
     // The insertion pointer for new values.
-    pub(crate) insertion_pointer: u32,
+    pub(crate) next_insert: u64,
     /// The size of a key.
     pub(crate) key_length: u16,
     // Extra header space, intentionally left blank for future versions.
-    pub(crate) _padding: [u8; 34],
+    pub(crate) _padding: [u8; 30],
 }
 
 unsafe impl Pod for DatabaseHeader {}
@@ -88,9 +88,9 @@ impl DatabaseHeader {
         self.magic_bytes = MAGIC_BYTES;
         self.endianness_check = ENDIANNESS_CHECK_CONST;
         self.version = 1;
-        self.insertion_pointer = mem::size_of::<Self>() as u32;
+        self.next_insert = mem::size_of::<Self>() as u64;
         self.key_length = mem::size_of::<GenericArray<u8, N>> as u16;
-        self._padding = [0; 34];
+        self._padding = [0; 30];
     }
 }
 
