@@ -7,6 +7,8 @@
 //!
 //! Overhead per stored value on disk is 4 bytes per record.
 
+mod unchecked_cast;
+
 use std::{
     collections::HashMap,
     fs,
