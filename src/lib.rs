@@ -12,11 +12,13 @@ use std::{
     fs,
     hash::Hash,
     io::{self, Seek, SeekFrom, Write},
+    marker::PhantomData,
     mem,
     path::Path,
     sync::atomic::AtomicU64,
 };
 
+use generic_array::{ArrayLength, GenericArray};
 use memmap::{MmapMut, MmapOptions};
 
 // TODO: Use im-rs for parallel read/write.
@@ -37,21 +39,19 @@ const MAGIC_BYTES: [u8; 64] = [
     b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
     b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
 ];
-const MAGIC_BYTES_LEN: usize = 64;
-const DB_HEADER_SIZE: usize = DB_LEN_SIZE + MAGIC_BYTES_LEN;
 
 #[derive(Debug)]
-struct StufferShack<K> {
+struct StufferShack<N: ArrayLength<u8>> {
     /// Maps a key to an offset.
-    index: HashMap<K, DbLen>,
+    index: HashMap<GenericArray<u8, N>, DbLen>,
     /// Internal data map.
     data: MmapMut,
+    _key: PhantomData<N>,
 }
 
-impl<K> StufferShack<K>
+impl<N> StufferShack<N>
 where
-    // TODO: Cleanup traits, `K` needs to be a fixed size POD.
-    K: Copy + Eq + Hash + AsRef<[u8]>,
+    N: ArrayLength<u8>,
 {
     fn open_disk<P: AsRef<Path>>(db: P) -> io::Result<Self> {
         let mut backing_file = fs::OpenOptions::new()
@@ -64,7 +64,7 @@ where
         backing_file.seek(SeekFrom::Start(0))?;
 
         // TODO: Is this necessary outside OS X?
-        backing_file.set_len(dbg!(MAP_SIZE as u64))?;
+        backing_file.set_len(MAP_SIZE as u64)?;
         backing_file.flush()?;
 
         let data = unsafe { MmapOptions::new().len(MAP_SIZE).map_mut(&backing_file)? };
@@ -72,7 +72,6 @@ where
         // TODO: Probably not necessary? Forgetting the backing file, so it won't be closed here.
         mem::forget(backing_file);
 
-        // TODO: Write offset.
         Self::new(data, file_len == 0)
     }
 
@@ -85,36 +84,42 @@ where
         let header = &mut data[0..DB_HEADER_SIZE];
 
         let mut index = HashMap::new();
-        eprintln!("checking");
         if dbg!(needs_init) {
             // Database not initialized, write the magic bytes and initial length.
             header[0..MAGIC_BYTES_LEN].copy_from_slice(&MAGIC_BYTES);
             let initial_len: DbLen = 0;
             header[MAGIC_BYTES_LEN..].copy_from_slice(&initial_len.to_le_bytes());
         } else if &header[0..MAGIC_BYTES_LEN] != &MAGIC_BYTES[..] {
-            return Err(todo!("magic bytes incorrect"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "database has invalid magic header",
+            ));
         }
-        eprintln!("check successful");
 
-        // We're already initialized, so walk entire data to restore the index.
-        let total_size = store_length(&data) as usize;
-        let mut cur = DB_HEADER_SIZE;
-        while cur < total_size {
-            let record = load_record::<K>(&data, cur as u64);
-            // length, hash, data. We only need the hash.
-            // TODO: Unsafe-cast record header instead.
-            let hash_bytes = &record[ITEM_LEN_SIZE..(ITEM_LEN_SIZE + mem::size_of::<K>())];
+        // // We're already initialized, so walk entire data to restore the index.
+        // let total_size = store_length(&data) as usize;
+        // let mut cur = DB_HEADER_SIZE;
+        // while cur < total_size {
+        //     let record = load_record::<K>(&data, cur as u64);
+        //     // length, hash, data. We only need the hash.
+        //     // TODO: Unsafe-cast record header instead.
+        //     let hash_bytes = &record[ITEM_LEN_SIZE..(ITEM_LEN_SIZE + mem::size_of::<K>())];
 
-            // TODO: Find something better (moot with record header).
-            let hash_ptr: *const K = hash_bytes.as_ptr() as *const K;
-            let hash = unsafe { *hash_ptr };
+        //     // TODO: Find something better (moot with record header).
+        //     let hash_ptr: *const K = hash_bytes.as_ptr() as *const K;
+        //     let hash = unsafe { *hash_ptr };
 
-            index.insert(hash, cur as DbLen);
-            cur += record.len();
-        }
-        dbg!(index.len());
+        //     index.insert(hash, cur as DbLen);
+        //     cur += record.len();
+        // }
+        // dbg!(index.len());
 
-        Ok(StufferShack { index, data })
+        // Ok(StufferShack {
+        //     index,
+        //     data,
+        //     _key: PhantomData,
+        // })
+        todo!()
     }
 
     fn size(&self) -> u64 {
@@ -140,41 +145,31 @@ where
     }
 
     // TODO: Allow parallel writes.
-    fn write(&mut self, key: K, value: &[u8]) {
+    fn write(&mut self, key: GenericArray<u8, N>, value: &[u8]) {
         assert!(
             self.index.get(&key).is_none(),
             "rewriting keys is not supported"
         );
 
-        // Determine where to write the data.
-        // TODO: See if ordering can be relaxed.
-        // TODO: Ensure conversion is not lossy.
-        let value_len = value.len();
-        assert!(value_len <= ItemLen::MAX as usize);
-
-        // Format: LENGTH(32) + KEY + VALUE
-        let record_len = calc_record_len::<K>(value_len as u32);
-        let (record_offset, record) = self.reserve_record(record_len.try_into().unwrap());
-
-        // TODO: Optimize range checks.
-
-        // Write length to record.
-        record[0..ITEM_LEN_SIZE].copy_from_slice(&(value_len as ItemLen).to_le_bytes());
-
-        let value_offset = ITEM_LEN_SIZE + mem::size_of::<K>();
-        record[ITEM_LEN_SIZE..value_offset].copy_from_slice(key.as_ref());
-        record[value_offset..].copy_from_slice(value);
+        // Get insertion point.
+        let insertion_point = todo!();
+        let next_insertion_point =
+            write_record::<N>(&mut self.data, insertion_point, key.as_ref(), value);
 
         // Update index.
-        self.index.insert(key, record_offset);
+        self.index.insert(key, insertion_point);
+
+        // Note: By updating the insertion point here, we gain some sort of transactional durability. Alternatively we can increase the insertion point sooner to gain parallel writes. (TODO) Adding a second insertion pointer would give us both.
+        todo!("update insertion point");
     }
 
-    fn read(&self, key: &K) -> Option<&[u8]> {
+    fn read(&self, key: &GenericArray<u8, N>) -> Option<&[u8]> {
         let data_offset = *self.index.get(key)?;
-        let record = load_record::<K>(&self.data, data_offset);
+        todo!()
+        // let record = load_record::<K>(&self.data, data_offset);
 
-        let value_slice = &record[(ITEM_LEN_SIZE + mem::size_of::<K>())..];
-        Some(value_slice)
+        // let value_slice = &record[(ITEM_LEN_SIZE + mem::size_of::<K>())..];
+        // Some(value_slice)
     }
 }
 
@@ -192,25 +187,78 @@ fn data_offset_to_memory_offset(offset: DbLen) -> usize {
     offset as usize + DB_HEADER_SIZE
 }
 
-/// Loads a record from a specified offset.
-fn load_record<K>(data: &MmapMut, data_offset: DbLen) -> &[u8] {
-    // Read the length.
-    let mem_offset = data_offset_to_memory_offset(data_offset);
-    let value_len = ItemLen::from_le_bytes(
-        data[mem_offset..(mem_offset + ITEM_LEN_SIZE)]
-            .try_into()
-            .unwrap(),
-    );
-    let record_len = calc_record_len::<K>(value_len);
-
-    &data[mem_offset..(mem_offset + record_len as usize)]
+/// Database header.
+#[derive(Clone, Debug)]
+struct DatabaseHeader {
+    magic_bytes: [u8; 64],
+    insertion_pointer: u32,
 }
 
-/// Calculates the length of a record from its data length (by adding key + local header size).
-fn calc_record_len<K>(value_len: ItemLen) -> DbLen {
-    (ITEM_LEN_SIZE + mem::size_of::<K>() + value_len as usize)
-        .try_into()
-        .unwrap()
+impl DatabaseHeader {
+    fn is_valid(&self) -> bool {
+        self.magic_bytes == MAGIC_BYTES
+    }
+}
+
+/// Record header.
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct RecordHeader<N: ArrayLength<u8>> {
+    /// The length of the data value.
+    value_length: u32,
+    /// The key, typically a hash.
+    key: GenericArray<u8, N>,
+}
+
+/// Retrieve a record (with header) at offset.
+///
+/// Given a specific data offset, returns the record header and data slice.
+#[inline]
+fn record_at_offset<N: ArrayLength<u8>>(
+    data: &MmapMut,
+    data_offset: DbLen,
+) -> (&RecordHeader<N>, &[u8]) {
+    let header_size = mem::size_of::<RecordHeader<N>>();
+
+    // A "const" assertion as a sanity check we stuck into this function.
+    debug_assert_eq!(header_size, 4 + mem::size_of::<GenericArray<u8, N>>());
+
+    let start = data_offset_to_memory_offset(data_offset);
+    let header_ptr = start as *const RecordHeader<N>;
+
+    // TODO: FIX POTENTIAL ALIGNMENT ISSUES.
+    let header = unsafe { header_ptr.as_ref() }.expect("DID YOU FIX THE ALIGNMENT ISSUES?");
+
+    let value_slice = &data[start..(start + header_size)];
+    (header, value_slice)
+}
+
+/// Write a record at specified location.
+///
+/// Returns the next available `data_offset` after the write.
+fn write_record<N: ArrayLength<u8>>(
+    data: &mut MmapMut,
+    data_offset: DbLen,
+    key: &[u8],
+    value: &[u8],
+) -> DbLen {
+    let header_size = mem::size_of::<RecordHeader<N>>();
+    let start = data_offset_to_memory_offset(data_offset);
+    let header_ptr = start as *mut RecordHeader<N>;
+
+    // TODO: FIX POTENTIAL ALIGNMENT ISSUES.
+    let header = unsafe { header_ptr.as_mut() }.expect("DID YOU FIX THE ALIGNMENT ISSUES?");
+    assert!(
+        value.len() < u32::MAX as usize,
+        "value too large to be stored"
+    );
+    header.value_length = value.len() as u32;
+    header.key.copy_from_slice(key);
+
+    let value_slice = &mut data[start..(start + header_size)];
+    value_slice.copy_from_slice(value);
+
+    data_offset + header_size as DbLen + value.len() as DbLen
 }
 
 #[cfg(test)]
