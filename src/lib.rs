@@ -51,6 +51,7 @@ struct StufferShack<N: ArrayLength<u8>> {
 impl<N> StufferShack<N>
 where
     N: ArrayLength<u8>,
+    N::ArrayType: Copy,
 {
     fn open_disk<P: AsRef<Path>>(db: P) -> io::Result<Self> {
         let mut backing_file = fs::OpenOptions::new()
@@ -189,7 +190,7 @@ fn data_offset_to_memory_offset(offset: DbLen) -> usize {
 }
 
 /// Database header.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 struct DatabaseHeader {
     // Magic bytes, see `MAGIC_BYTES`.
@@ -235,7 +236,11 @@ enum InvalidDatabaseError {
 
 impl DatabaseHeader {
     /// Checks that the header is valid for keys with the specified size.
-    fn is_valid<N: ArrayLength<u8>>(&self) -> Result<(), InvalidDatabaseError> {
+    fn is_valid<N>(&self) -> Result<(), InvalidDatabaseError>
+    where
+        N: ArrayLength<u8>,
+        N::ArrayType: Copy,
+    {
         let key_length = mem::size_of::<GenericArray<u8, N>>();
 
         // Sanity check to ensure all of our data structures have the right size.
@@ -277,8 +282,12 @@ impl DatabaseHeader {
 
 /// Record header.
 #[repr(C)]
-#[derive(Clone, Debug)]
-struct RecordHeader<N: ArrayLength<u8>> {
+#[derive(Copy, Clone, Debug)]
+struct RecordHeader<N>
+where
+    N: ArrayLength<u8>,
+    N::ArrayType: Copy,
+{
     /// The length of the data value.
     value_length: u32,
     /// The key, typically a hash.
@@ -289,10 +298,11 @@ struct RecordHeader<N: ArrayLength<u8>> {
 ///
 /// Given a specific data offset, returns the record header and data slice.
 #[inline]
-fn record_at_offset<N: ArrayLength<u8>>(
-    data: &MmapMut,
-    data_offset: DbLen,
-) -> (&RecordHeader<N>, &[u8]) {
+fn record_at_offset<N>(data: &MmapMut, data_offset: DbLen) -> (&RecordHeader<N>, &[u8])
+where
+    N: ArrayLength<u8>,
+    N::ArrayType: Copy,
+{
     let header_size = mem::size_of::<RecordHeader<N>>();
 
     let start = data_offset_to_memory_offset(data_offset);
@@ -308,12 +318,11 @@ fn record_at_offset<N: ArrayLength<u8>>(
 /// Write a record at specified location.
 ///
 /// Returns the next available `data_offset` after the write.
-fn write_record<N: ArrayLength<u8>>(
-    data: &mut MmapMut,
-    data_offset: DbLen,
-    key: &[u8],
-    value: &[u8],
-) -> DbLen {
+fn write_record<N>(data: &mut MmapMut, data_offset: DbLen, key: &[u8], value: &[u8]) -> DbLen
+where
+    N: ArrayLength<u8>,
+    N::ArrayType: Copy,
+{
     let header_size = mem::size_of::<RecordHeader<N>>();
     let start = data_offset_to_memory_offset(data_offset);
     let header_ptr = start as *mut RecordHeader<N>;
