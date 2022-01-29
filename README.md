@@ -40,6 +40,7 @@ This section is not a roadmap, but a list of ideas of features that may be imple
 * Endianness conversion: Endianness issues can be solved by either standardizing on a specific endianness, or offering a function to rewrite all lengths in the database on open.
 * Deletion support: By inserting tombstones as items in the write log, support for item deletion can be added. This may increase the disk space requirement, unless `u32::MAX` is used as a sentinel value.
 * Alignment support: By padding records and values written to disk, proper alignment to an arbitrary boundary can be enforced. If the alignment is implicit, i.e. according to fixes rules, no extra information needs to be written.
+* Persistent index: As an option, it should be possible to specify that the index be written to disk as well, to allow for faster startup.
 
 
 ## Outstanding issues
@@ -48,5 +49,5 @@ This section is not a roadmap, but a list of ideas of features that may be imple
 * Volatile memory may need to be used, this needs to be double checked.
 * The `write` and `read` interface could be improved to automatically convert keys where possible, avoiding the need for `GenericArray` and making it possible to just call it with a `[u8; _]` as the key.
 * Configurable `mmap` size. Right now, the size is hardcoded.
-* Detailed information about Linux vs Mac OS X should be added, specifically around sparseness and file limits.
+* Detailed information about Linux vs Mac OS X should be added, specifically around sparseness and file limits. Also, the closing of the backing file in database initialization may be platform-dependent requirement.
 * A torture-test suite needs to be added.

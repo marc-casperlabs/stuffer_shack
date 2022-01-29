@@ -29,12 +29,7 @@ use crate::{
     unchecked_cast::{UncheckedCast, UncheckedCastMut},
 };
 
-// TODO: Use im-rs for parallel read/write.
-// TODO: Use serialization of in-memory index, storing offset, to allow fast recovery of WAL.
-// TODO: Persist write offset.
-// TODO: Consider packing.
-
-const MAP_SIZE: usize = u32::MAX as usize * 2; // TODO: Make this configurable.
+const MAP_SIZE: usize = u32::MAX as usize * 2;
 
 /// An append-only database with fixed keys.
 #[derive(Debug)]
@@ -80,7 +75,6 @@ where
         let data = unsafe { MmapOptions::new().len(MAP_SIZE).map_mut(&backing_file) }
             .map_err(StufferShackError::DatabaseOpen)?;
 
-        // TODO: Probably not necessary? We forget the backing file, so it won't be closed on drop.
         mem::forget(backing_file);
 
         Self::new(data, file_len == 0).map_err(StufferShackError::DatabaseInit)
