@@ -34,7 +34,7 @@ use crate::{
 // TODO: Persist write offset.
 // TODO: Consider packing.
 
-const MAP_SIZE: usize = u32::MAX as usize; // TODO: Make this configurable.
+const MAP_SIZE: usize = u32::MAX as usize * 2; // TODO: Make this configurable.
 
 /// An append-only database with fixed keys.
 #[derive(Debug)]
@@ -176,7 +176,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
+    use std::{fs, mem};
 
     use super::StufferShack;
     use generic_array::{typenum::U32, GenericArray};
@@ -234,7 +234,6 @@ mod tests {
             let seed = [0xFF; 32];
 
             let max_len = 8000usize;
-            let limit: usize = 524287; // 7th Mersenne prime.
 
             let data = (0..max_len).map(|num| num as u8).collect();
             let sizes = Box::new([0usize, 1, 8, 32, 1, 4, 4, 4, 1, 7000, 8, 4]);
@@ -269,11 +268,10 @@ mod tests {
 
     #[test]
     fn ten_million_entries() {
-        let count = 1_000_000;
+        let count = 10_000_000;
 
-        // TODO: Do on-disk.
-        let mut shack: Shack = StufferShack::open_ephemeral(1024 * 1024 * 1024).unwrap();
-        // let mut shack: Shack = StufferShack::open_disk("test.shack").unwrap();
+        let _ = fs::remove_file("test.shack");
+        let mut shack: Shack = StufferShack::open_disk("test.shack").unwrap();
 
         let mut total_payload = 0usize;
 
