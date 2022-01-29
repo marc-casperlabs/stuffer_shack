@@ -220,88 +220,87 @@ mod tests {
         }
     }
 
-    // #[derive(Clone, Debug)]
-    // struct DataGen {
-    //     current: usize,
-    //     sizes: Box<[usize]>,
-    //     offsets: Box<[usize]>,
-    //     data: &'static [u8],
-    //     rng: rand_chacha::ChaCha12Rng,
-    // }
+    #[derive(Clone, Debug)]
+    struct DataGen {
+        current: usize,
+        sizes: Box<[usize]>,
+        offsets: Box<[usize]>,
+        data: &'static [u8],
+        rng: rand_chacha::ChaCha12Rng,
+    }
 
-    // impl DataGen {
-    //     fn new() -> Self {
-    //         let seed = [0xFF; 32];
+    impl DataGen {
+        fn new() -> Self {
+            let seed = [0xFF; 32];
 
-    //         let max_len = 8000usize;
-    //         let limit: usize = 524287; // 7th Mersenne prime.
+            let max_len = 8000usize;
+            let limit: usize = 524287; // 7th Mersenne prime.
 
-    //         let data = (0..max_len).map(|num| num as u8).collect();
-    //         let sizes = Box::new([0usize, 1, 8, 32, 1, 4, 4, 4, 1, 7000, 8, 4]);
-    //         let offsets = Box::new([0, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31]);
+            let data = (0..max_len).map(|num| num as u8).collect();
+            let sizes = Box::new([0usize, 1, 8, 32, 1, 4, 4, 4, 1, 7000, 8, 4]);
+            let offsets = Box::new([0, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31]);
 
-    //         let rng = rand_chacha::ChaCha12Rng::from_seed(seed);
+            let rng = rand_chacha::ChaCha12Rng::from_seed(seed);
 
-    //         DataGen {
-    //             current: 0,
-    //             sizes,
-    //             offsets,
-    //             data: Box::leak(data),
-    //             rng,
-    //         }
-    //     }
-    // }
+            DataGen {
+                current: 0,
+                sizes,
+                offsets,
+                data: Box::leak(data),
+                rng,
+            }
+        }
+    }
 
-    // impl Iterator for DataGen {
-    //     type Item = ([u8; 32], &'static [u8]);
+    impl Iterator for DataGen {
+        type Item = ([u8; 32], &'static [u8]);
 
-    //     fn next(&mut self) -> Option<Self::Item> {
-    //         let size = self.sizes[self.current % self.sizes.len()];
-    //         let offset = self.offsets[self.current % self.offsets.len()];
+        fn next(&mut self) -> Option<Self::Item> {
+            let size = self.sizes[self.current % self.sizes.len()];
+            let offset = self.offsets[self.current % self.offsets.len()];
 
-    //         let slice = &self.data[offset..(size + offset)];
+            let slice = &self.data[offset..(size + offset)];
 
-    //         self.current += 1;
+            self.current += 1;
 
-    //         Some((self.rng.gen(), slice))
-    //     }
-    // }
+            Some((self.rng.gen(), slice))
+        }
+    }
 
-    // #[test]
-    // fn ten_million_entries() {
-    //     let count = 1_000_000;
+    #[test]
+    fn ten_million_entries() {
+        let count = 1_000_000;
 
-    //     // TODO: Do on-disk.
-    //     // let mut shack: StufferShack<Key> =
-    //     // StufferShack::open_ephemeral(1024 * 1024 * 1024).unwrap();
-    //     let mut shack: StufferShack<Key> = StufferShack::open_disk("test.shack").unwrap();
+        // TODO: Do on-disk.
+        let mut shack: Shack = StufferShack::open_ephemeral(1024 * 1024 * 1024).unwrap();
+        // let mut shack: Shack = StufferShack::open_disk("test.shack").unwrap();
 
-    //     let mut total_payload = 0usize;
+        let mut total_payload = 0usize;
 
-    //     // First, write entries.
-    //     let data = DataGen::new();
-    //     for (key, value) in data.take(count) {
-    //         total_payload += key.len() + value.len();
+        // First, write entries.
+        let data = DataGen::new();
+        for (key, value) in data.take(count) {
+            total_payload += key.len() + value.len();
 
-    //         shack.write(key, value);
-    //     }
+            shack.write(key.into(), value);
+        }
 
-    //     // Read back and verify entries.
-    //     let data = DataGen::new();
-    //     for (key, value) in data.take(count) {
-    //         let read_value = shack.read(&key);
-    //         assert_eq!(read_value, Some(value));
-    //     }
+        // Read back and verify entries.
+        let data = DataGen::new();
+        for (key, value) in data.take(count) {
+            let read_value = shack.read(&key.into());
+            assert_eq!(read_value, Some(value));
+        }
 
-    //     let db_size = shack.size() as usize;
-    //     let overhead = db_size - total_payload;
+        let db_size = shack.size() as usize;
+        let overhead = db_size - total_payload;
 
-    //     println!(
-    //         "total payload {}  db size {}  overhead {}  ratio {}",
-    //         total_payload,
-    //         db_size,
-    //         overhead,
-    //         db_size as f64 / total_payload as f64
-    //     )
-    // }
+        println!(
+            "total payload {}  db size {}  overhead {}  ratio {}",
+            total_payload,
+            db_size,
+            overhead,
+            db_size as f64 / total_payload as f64
+        )
+    }
 }
