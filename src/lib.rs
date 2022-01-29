@@ -14,8 +14,7 @@ mod unchecked_cast;
 use std::{
     collections::HashMap,
     fs,
-    hash::Hash,
-    io::{self, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     marker::PhantomData,
     mem,
     path::Path,
@@ -37,16 +36,11 @@ use crate::{
 
 const MAP_SIZE: usize = u32::MAX as usize; // TODO: Make this configurable.
 
-type ItemLen = u32;
-type DbLen = u64;
-const ITEM_LEN_SIZE: usize = mem::size_of::<ItemLen>();
-const DB_LEN_SIZE: usize = mem::size_of::<DbLen>();
-
 /// An append-only database with fixed keys.
 #[derive(Debug)]
 pub struct StufferShack<N: ArrayLength<u8>> {
     /// Maps a key to an offset.
-    index: HashMap<GenericArray<u8, N>, DbLen>,
+    index: HashMap<GenericArray<u8, N>, u64>,
     /// Internal data map.
     data: MmapMut,
     /// Phantom data to record key length.
@@ -131,119 +125,53 @@ where
         })
     }
 
-    fn size(&self) -> u64 {
-        store_length(&self.data)
+    /// Returns the length of the data store.
+    pub fn size(&self) -> u64 {
+        self.data.at::<DatabaseHeader>(0).next_insert
     }
 
-    /// Store the length of the db without the header in the db header.
-    fn write_store_length(&mut self, size: DbLen) {
-        todo!()
-        // let dest = &mut self.data[MAGIC_BYTES_LEN..(MAGIC_BYTES_LEN + DB_LEN_SIZE)];
-        // dest.copy_from_slice(&size.to_le_bytes());
-    }
-
-    /// Reserves a record in the db with the specified size.
+    /// Writes a value to the database.
     ///
-    /// Returns the data offset and a writable slice.
-    fn reserve_record(&mut self, record_size: ItemLen) -> (DbLen, &mut [u8]) {
-        let old_store_length = store_length(&self.data);
-        let new_store_length = old_store_length + record_size as DbLen;
-        self.write_store_length(new_store_length);
-        let data = &mut self.data[data_offset_to_memory_offset(old_store_length)
-            ..data_offset_to_memory_offset(new_store_length)];
-        (old_store_length, data)
-    }
+    /// # Panic
+    ///
+    /// Panics if `value` is bigger than `u32::MAX`.
+    #[inline]
+    pub fn write(&mut self, key: GenericArray<u8, N>, value: &[u8]) {
+        assert!(value.len() < u32::MAX as usize, "value to large to insert");
 
-    // TODO: Allow parallel writes.
-    fn write(&mut self, key: GenericArray<u8, N>, value: &[u8]) {
-        assert!(
-            self.index.get(&key).is_none(),
-            "rewriting keys is not supported"
-        );
+        let insertion_point = self.data.at::<DatabaseHeader>(0).next_insert;
+        let record_header: &mut RecordHeader<N> = self.data.at_mut(insertion_point as usize);
 
-        // Get insertion point.
-        let insertion_point = todo!();
-        let next_insertion_point =
-            write_record::<N>(&mut self.data, insertion_point, key.as_ref(), value);
+        record_header.key = key;
+        record_header.value_length = value.len() as u32;
 
-        // Update index.
+        // Copy actual value.
+        let value_start = insertion_point as usize + mem::size_of::<RecordHeader<N>>();
+        let value_end = value_start + value.len();
+        self.data[value_start..value_end].copy_from_slice(value);
+
+        // We're done, update insertion point pointer. This is done _after_ writing the value, so
+        // in the event of a crash, we lose this write, but not database integrity.
+        //
+        // If we ever want to enforce alignment, here's the place to do it.
+        let db_header = self.data.at_mut::<DatabaseHeader>(0);
+        db_header.next_insert = value_end as u64;
+
+        // We have written the entire value, now update the index.
         self.index.insert(key, insertion_point);
-
-        // Note: By updating the insertion point here, we gain some sort of transactional durability. Alternatively we can increase the insertion point sooner to gain parallel writes. (TODO) Adding a second insertion pointer would give us both.
-        todo!("update insertion point");
     }
 
-    fn read(&self, key: &GenericArray<u8, N>) -> Option<&[u8]> {
-        let data_offset = *self.index.get(key)?;
-        todo!()
-        // let record = load_record::<K>(&self.data, data_offset);
+    /// Reads a value from the database.
+    #[inline]
+    pub fn read(&self, key: &GenericArray<u8, N>) -> Option<&[u8]> {
+        let record_offset = *self.index.get(key)?;
 
-        // let value_slice = &record[(ITEM_LEN_SIZE + mem::size_of::<K>())..];
-        // Some(value_slice)
+        let header: &RecordHeader<N> = self.data.at(record_offset as usize);
+        let data_offset = record_offset as usize + mem::size_of::<RecordHeader<N>>();
+        let value_slice = &self.data[data_offset..(data_offset + header.value_length as usize)];
+
+        Some(value_slice)
     }
-}
-
-/// Retrieves the length of the db without header from the db header.
-fn store_length(data: &MmapMut) -> DbLen {
-    todo!()
-    // DbLen::from_le_bytes(
-    //     data[MAGIC_BYTES_LEN..(MAGIC_BYTES_LEN + DB_LEN_SIZE)]
-    //         .try_into()
-    //         .unwrap(),
-    // )
-}
-
-/// Converts a database offset into a memory offset, which includes the header.
-fn data_offset_to_memory_offset(offset: DbLen) -> usize {
-    offset as usize + mem::size_of::<DatabaseHeader>()
-}
-
-/// Retrieve a record (with header) at offset.
-///
-/// Given a specific data offset, returns the record header and data slice.
-#[inline]
-fn record_at_offset<N>(data: &MmapMut, data_offset: DbLen) -> (&RecordHeader<N>, &[u8])
-where
-    N: ArrayLength<u8>,
-    N::ArrayType: Copy,
-{
-    let header_size = mem::size_of::<RecordHeader<N>>();
-
-    let start = data_offset_to_memory_offset(data_offset);
-    let header_ptr = start as *const RecordHeader<N>;
-
-    // TODO: FIX POTENTIAL ALIGNMENT ISSUES.
-    let header = unsafe { header_ptr.as_ref() }.expect("DID YOU FIX THE ALIGNMENT ISSUES?");
-
-    let value_slice = &data[start..(start + header_size)];
-    (header, value_slice)
-}
-
-/// Write a record at specified location.
-///
-/// Returns the next available `data_offset` after the write.
-fn write_record<N>(data: &mut MmapMut, data_offset: DbLen, key: &[u8], value: &[u8]) -> DbLen
-where
-    N: ArrayLength<u8>,
-    N::ArrayType: Copy,
-{
-    let header_size = mem::size_of::<RecordHeader<N>>();
-    let start = data_offset_to_memory_offset(data_offset);
-    let header_ptr = start as *mut RecordHeader<N>;
-
-    // TODO: FIX POTENTIAL ALIGNMENT ISSUES.
-    let header = unsafe { header_ptr.as_mut() }.expect("DID YOU FIX THE ALIGNMENT ISSUES?");
-    assert!(
-        value.len() < u32::MAX as usize,
-        "value too large to be stored"
-    );
-    header.value_length = value.len() as u32;
-    header.key.copy_from_slice(key);
-
-    let value_slice = &mut data[start..(start + header_size)];
-    value_slice.copy_from_slice(value);
-
-    data_offset + header_size as DbLen + value.len() as DbLen
 }
 
 #[cfg(test)]
