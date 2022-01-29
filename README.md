@@ -51,3 +51,4 @@ This section is not a roadmap, but a list of ideas of features that may be imple
 * Configurable `mmap` size. Right now, the size is hardcoded.
 * Detailed information about Linux vs Mac OS X should be added, specifically around sparseness and file limits. Also, the closing of the backing file in database initialization may be platform-dependent requirement.
 * A torture-test suite needs to be added.
+* The module documentation needs to be greatly improved.
