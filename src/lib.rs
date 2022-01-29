@@ -176,11 +176,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, mem};
+    use std::fs;
 
     use super::StufferShack;
     use generic_array::{typenum::U32, GenericArray};
-    use proptest::{proptest, strategy::Strategy};
+    use proptest::proptest;
     use proptest_derive::Arbitrary;
     use rand::{Rng, SeedableRng};
 
