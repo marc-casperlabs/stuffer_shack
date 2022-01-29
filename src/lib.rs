@@ -7,6 +7,8 @@
 //!
 //! Overhead per stored value on disk is 4 bytes per record.
 
+pub mod error;
+mod headers;
 mod unchecked_cast;
 
 use std::{
@@ -17,32 +19,29 @@ use std::{
     marker::PhantomData,
     mem,
     path::Path,
-    sync::atomic::AtomicU64,
 };
 
 use generic_array::{ArrayLength, GenericArray};
 use memmap::{MmapMut, MmapOptions};
-use thiserror::Error;
+
+use crate::{
+    headers::{DatabaseHeader, RecordHeader},
+    unchecked_cast::UncheckedCastMut,
+};
 
 // TODO: Use im-rs for parallel read/write.
 // TODO: Use serialization of in-memory index, storing offset, to allow fast recovery of WAL.
 // TODO: Persist write offset.
 // TODO: Consider packing.
 
-// const MAP_SIZE: usize = usize::MAX / 2;
-const MAP_SIZE: usize = u32::MAX as usize; // TODO: Figure out why allocation fails.
+const MAP_SIZE: usize = u32::MAX as usize; // TODO: Make this configurable.
 
 type ItemLen = u32;
 type DbLen = u64;
 const ITEM_LEN_SIZE: usize = mem::size_of::<ItemLen>();
 const DB_LEN_SIZE: usize = mem::size_of::<DbLen>();
-const MAGIC_BYTES: [u8; 16] = [
-    b'S', b'T', b'U', b'F', b'F', b'E', b'R', b'_', b'S', b'H', b'A', b'C', b'K', b'_', b'_', b'_',
-];
-const ENDIANNESS_CHECK_CONST: u32 = 0xA1B2C3D4;
-
 #[derive(Debug)]
-struct StufferShack<N: ArrayLength<u8>> {
+pub struct StufferShack<N: ArrayLength<u8>> {
     /// Maps a key to an offset.
     index: HashMap<GenericArray<u8, N>, DbLen>,
     /// Internal data map.
@@ -55,34 +54,44 @@ where
     N: ArrayLength<u8>,
     N::ArrayType: Copy,
 {
-    fn open_disk<P: AsRef<Path>>(db: P) -> io::Result<Self> {
+    /// Opens a database that is backed by a file on the filesystem.
+    pub fn open_disk<P: AsRef<Path>>(db: P) -> io::Result<Self> {
         let mut backing_file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(db)?;
 
+        // Determine the length of the existing file.
         let file_len = backing_file.seek(SeekFrom::End(0))?;
         backing_file.seek(SeekFrom::Start(0))?;
 
-        // TODO: Is this necessary outside OS X?
+        // Truncate the file to the maximum length. This may need to be made configurable, as they allocated file size varies between operation systems, depending on whether they support sparse files. Additionally, while this is necessary on OS X, it is unnecessary on Linux.
         backing_file.set_len(MAP_SIZE as u64)?;
         backing_file.flush()?;
 
         let data = unsafe { MmapOptions::new().len(MAP_SIZE).map_mut(&backing_file)? };
 
-        // TODO: Probably not necessary? Forgetting the backing file, so it won't be closed here.
+        // TODO: Probably not necessary? We forget the backing file, so it won't be closed on drop.
         mem::forget(backing_file);
 
         Self::new(data, file_len == 0)
     }
 
-    fn open_ephemeral(size: usize) -> io::Result<Self> {
+    /// Opens an in-memory database not backed by a file.
+    pub fn open_ephemeral(size: usize) -> io::Result<Self> {
         let data = unsafe { MmapOptions::new().len(size).map_anon()? };
         Self::new(data, true)
     }
 
+    /// Creates a new stuffer shack database.
+    ///
+    /// If `needs_init` is true, a database header will be written immediately. Otherwise, an
+    /// existing header is assumed to exist and will be checked.
     fn new(mut data: MmapMut, needs_init: bool) -> io::Result<Self> {
+        if needs_init {
+            let new_header: &mut DatabaseHeader = data.at_mut(0);
+        }
         // let header = &mut data[0..DB_HEADER_SIZE];
 
         // let mut index = HashMap::new();
@@ -189,111 +198,6 @@ fn store_length(data: &MmapMut) -> DbLen {
 /// Converts a database offset into a memory offset, which includes the header.
 fn data_offset_to_memory_offset(offset: DbLen) -> usize {
     offset as usize + mem::size_of::<DatabaseHeader>()
-}
-
-/// Database header.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-struct DatabaseHeader {
-    // Magic bytes, see `MAGIC_BYTES`.
-    magic_bytes: [u8; 16],
-    // The value `ENDIANNESS_CHECK_CONST` (will be encoded using native endianness).
-    endianness_check: u32,
-    // Database version. Currently must be 1.
-    version: u32,
-    // The insertion pointer for new values.
-    insertion_pointer: u32,
-    /// The size of a key.
-    key_length: u16,
-    // Extra header space, intentionally left blank for future versions.
-    _padding: [u8; 34],
-}
-
-#[derive(Copy, Clone, Debug, Error)]
-enum InvalidDatabaseError {
-    /// First bytes were not equal to the magic file header.
-    #[error("invalid magic at start of file")]
-    InvalidMagic,
-    /// The endianness constant found in the header differed from the stored one.
-    #[error("database failed endianness check")]
-    EndiannessMismatch,
-    /// Version mismatch.
-    #[error("version not supported: {version}")]
-    UnsupportedVersion {
-        /// The version found in the database file.
-        version: u32,
-    },
-    /// The compile-time configured key length does not match opened db.
-    #[error("key length mismatch (expected {expected}, actual {actual}")]
-    KeyLengthMismatch {
-        /// Version that was expected, based on how the database was instantiated.
-        expected: u16,
-        /// Version found in the database.
-        actual: u16,
-    },
-    /// The key length given at compile time is too large to fit a `u16`.
-    #[error("key length overflow")]
-    KeyLengthOverflow,
-}
-
-impl DatabaseHeader {
-    /// Checks that the header is valid for keys with the specified size.
-    fn is_valid<N>(&self) -> Result<(), InvalidDatabaseError>
-    where
-        N: ArrayLength<u8>,
-        N::ArrayType: Copy,
-    {
-        let key_length = mem::size_of::<GenericArray<u8, N>>();
-
-        // Sanity check to ensure all of our data structures have the right size.
-        assert_eq!(mem::size_of::<DatabaseHeader>(), 64);
-        assert_eq!(
-            mem::size_of::<RecordHeader<N>>(),
-            // Four bytes (for the offset pointer) + the actual length of the array.
-            4 + key_length
-        );
-
-        if self.magic_bytes != MAGIC_BYTES {
-            return Err(InvalidDatabaseError::InvalidMagic);
-        }
-
-        if self.endianness_check != ENDIANNESS_CHECK_CONST {
-            return Err(InvalidDatabaseError::EndiannessMismatch);
-        }
-
-        if self.version != 1 {
-            return Err(InvalidDatabaseError::UnsupportedVersion {
-                version: self.version,
-            });
-        }
-
-        if key_length > u16::MAX as usize {
-            return Err(InvalidDatabaseError::KeyLengthOverflow);
-        }
-
-        if self.key_length != key_length as u16 {
-            return Err(InvalidDatabaseError::KeyLengthMismatch {
-                expected: key_length as u16,
-                actual: self.key_length,
-            });
-        }
-
-        Ok(())
-    }
-}
-
-/// Record header.
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-struct RecordHeader<N>
-where
-    N: ArrayLength<u8>,
-    N::ArrayType: Copy,
-{
-    /// The length of the data value.
-    value_length: u32,
-    /// The key, typically a hash.
-    key: GenericArray<u8, N>,
 }
 
 /// Retrieve a record (with header) at offset.
