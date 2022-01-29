@@ -89,7 +89,7 @@ impl DatabaseHeader {
         self.endianness_check = ENDIANNESS_CHECK_CONST;
         self.version = 1;
         self.next_insert = mem::size_of::<Self>() as u64;
-        self.key_length = mem::size_of::<GenericArray<u8, N>> as u16;
+        self.key_length = mem::size_of::<GenericArray<u8, N>>() as u16;
         self._padding = [0; 30];
     }
 }
