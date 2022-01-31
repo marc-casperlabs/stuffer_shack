@@ -29,7 +29,8 @@ use crate::{
     unchecked_cast::{UncheckedCast, UncheckedCastMut},
 };
 
-const MAP_SIZE: usize = u32::MAX as usize * 2;
+// 2 TB
+const MAP_SIZE: usize = 2 * 1024 * 1024 * 1024 * 1024;
 
 /// An append-only database with fixed keys.
 #[derive(Debug)]
