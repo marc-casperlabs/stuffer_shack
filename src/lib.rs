@@ -132,6 +132,21 @@ where
     /// Panics if `value` is bigger than `u32::MAX`.
     #[inline]
     pub fn write(&mut self, key: GenericArray<u8, N>, value: &[u8]) {
+        let insertion_point = self.write_anonymous(key, value);
+
+        // We have written the entire value, now update the index.
+        self.index.insert(key, insertion_point);
+    }
+
+    /// Writes a value to the database without making it visible.
+    ///
+    /// Returns the insertion point.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `value` is bigger than `u32::MAX`.
+    #[inline]
+    pub fn write_anonymous(&mut self, key: GenericArray<u8, N>, value: &[u8]) -> u64 {
         assert!(value.len() < u32::MAX as usize, "value to large to insert");
 
         let insertion_point = self.data.at::<DatabaseHeader>(0).next_insert;
@@ -152,8 +167,7 @@ where
         let db_header = self.data.at_mut::<DatabaseHeader>(0);
         db_header.next_insert = value_end as u64;
 
-        // We have written the entire value, now update the index.
-        self.index.insert(key, insertion_point);
+        insertion_point
     }
 
     /// Reads a value from the database.
